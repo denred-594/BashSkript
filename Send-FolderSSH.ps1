@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Sendet einen Ordner per rsync/SSH an einen Linux Server.
+    Sendet einen Ordner per SCP/SSH an einen Linux Server.
 
 .DESCRIPTION
-    Dieses Skript verwendet rsync über SSH um Ordner sicher auf einen
-    Linux Server zu übertragen. Kein Empfänger-Skript nötig!
+    Dieses Skript verwendet SCP (Secure Copy) über SSH um Ordner sicher auf einen
+    Linux Server zu übertragen. Verwendet nur den nativen Windows OpenSSH Client.
 
 .PARAMETER SourceFolder
     Der Pfad zum Ordner, der gesendet werden soll.
@@ -48,13 +48,7 @@ param(
     [string]$SSHKeyPath = "",
 
     [Parameter(Mandatory=$false)]
-    [int]$SSHPort = 22,
-
-    [Parameter(Mandatory=$false)]
-    [switch]$Delete,
-
-    [Parameter(Mandatory=$false)]
-    [switch]$DryRun
+    [int]$SSHPort = 22
 )
 
 function Write-Log {
@@ -86,7 +80,7 @@ function Get-FolderSizeMB {
 # ============== HAUPTPROGRAMM ==============
 
 Write-Log "=========================================="
-Write-Log "     Folder-SSH-Sender v1.0 (rsync)"
+Write-Log "     Folder-SSH-Sender v2.0 (SCP)"
 Write-Log "=========================================="
 
 # Validierung: Quellordner prüfen
@@ -95,14 +89,15 @@ if (-not (Test-Path $SourceFolder)) {
     exit 1
 }
 
-# Prüfen ob rsync verfügbar ist
-$rsyncAvailable = Test-Command "rsync"
+# Prüfen ob OpenSSH verfügbar ist (natives Windows-Feature)
 $scpAvailable = Test-Command "scp"
-$sshAvailable = Test-Command "ssh"
 
-if (-not $sshAvailable) {
-    Write-Log "SSH nicht gefunden! Bitte OpenSSH installieren." -Level "ERROR"
-    Write-Log "Windows: Settings > Apps > Optional Features > OpenSSH Client" -Level "WARN"
+if (-not $scpAvailable) {
+    Write-Log "OpenSSH Client nicht gefunden!" -Level "ERROR"
+    Write-Log "OpenSSH ist ein natives Windows-Feature (kein externes Programm)." -Level "WARN"
+    Write-Log "Aktivierung per PowerShell (als Administrator):" -Level "WARN"
+    Write-Log "  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0" -Level "WARN"
+    Write-Log "Oder: Einstellungen > Apps > Optionale Features > OpenSSH-Client" -Level "WARN"
     exit 1
 }
 
@@ -114,120 +109,50 @@ Write-Log "Dateien: $fileCount | Groesse: $folderSize MB"
 Write-Log "Ziel: ${RemoteUser}@${RemoteHost}:${RemotePath}"
 Write-Log "SSH-Port: $SSHPort"
 
-# SSH-Key Parameter aufbauen
-$sshKeyParam = ""
+# SSH-Key prüfen falls angegeben
 if ($SSHKeyPath) {
     if (Test-Path $SSHKeyPath) {
-        $sshKeyParam = "-i `"$SSHKeyPath`""
         Write-Log "SSH-Key: $SSHKeyPath" -Level "OK"
     } else {
         Write-Log "SSH-Key nicht gefunden: $SSHKeyPath" -Level "WARN"
     }
 }
 
-# Quellpfad für rsync/scp vorbereiten
-# OHNE trailing slash = Ordner selbst wird kopiert (inkl. Ordnername)
-# MIT trailing slash = Nur Inhalt wird kopiert
-$sourcePath = $SourceFolder.TrimEnd('\', '/')
-
 Write-Log "=========================================="
 
-# Methode wählen: rsync (bevorzugt) oder scp (Fallback)
-if ($rsyncAvailable) {
-    Write-Log "Verwende rsync (inkrementell, effizient)" -Level "OK"
+# SCP Transfer durchführen (natives Windows OpenSSH)
+Write-Log "Verwende SCP (nativer Windows OpenSSH Client)" -Level "OK"
 
-    # rsync Optionen aufbauen
-    $rsyncOptions = @(
-        "-avz",                          # archive, verbose, compress
-        "--progress",                    # Fortschritt anzeigen
-        "-e `"ssh -p $SSHPort $sshKeyParam`""  # SSH-Verbindung
-    )
+$scpOptions = @(
+    "-r",                            # rekursiv
+    "-P", $SSHPort                   # Port
+)
 
-    if ($Delete) {
-        $rsyncOptions += "--delete"      # Gelöschte Dateien auch auf Ziel löschen
-        Write-Log "Option: --delete aktiv (synchronisiert Löschungen)" -Level "WARN"
-    }
+if ($SSHKeyPath -and (Test-Path $SSHKeyPath)) {
+    $scpOptions += "-i", $SSHKeyPath
+}
 
-    if ($DryRun) {
-        $rsyncOptions += "--dry-run"
-        Write-Log "Option: --dry-run aktiv (keine echten Änderungen)" -Level "WARN"
-    }
+$scpCmd = "scp $($scpOptions -join ' ') `"$SourceFolder`" `"${RemoteUser}@${RemoteHost}:${RemotePath}`""
 
-    $rsyncCmd = "rsync $($rsyncOptions -join ' ') `"$sourcePath`" `"${RemoteUser}@${RemoteHost}:${RemotePath}`""
+Write-Log "Befehl: $scpCmd" -Level "CMD"
+Write-Log "Starte Transfer..."
 
-    Write-Log "Befehl: $rsyncCmd" -Level "CMD"
-    Write-Log "Starte Transfer..."
+try {
+    $scpArgs = $scpOptions + @($SourceFolder, "${RemoteUser}@${RemoteHost}:${RemotePath}")
+    $process = Start-Process -FilePath "scp" -ArgumentList $scpArgs -NoNewWindow -Wait -PassThru
 
-    try {
-        # rsync direkt ausführen (nicht via Start-Process, um korrekten Exit-Code zu erhalten)
-        $sshCmd = "ssh -p $SSHPort $sshKeyParam".Trim()
-
-        # rsync mit & aufrufen für direkten Exit-Code
-        & rsync -avz --progress `
-            --exclude=.DS_Store `
-            --exclude="._*" `
-            --exclude=".Spotlight-*" `
-            --exclude=.Trashes `
-            -e $sshCmd `
-            $sourcePath `
-            "${RemoteUser}@${RemoteHost}:${RemotePath}"
-
-        $exitCode = $LASTEXITCODE
-
-        # Exit-Codes: 0 = OK, 23 = partial transfer (oft nur Warnung), 24 = vanished files (OK)
-        if ($exitCode -eq 0) {
-            Write-Log "=========================================="
-            Write-Log "TRANSFER ERFOLGREICH ABGESCHLOSSEN" -Level "OK"
-            Write-Log "Dateien sind jetzt unter: ${RemoteUser}@${RemoteHost}:${RemotePath}"
-        } elseif ($exitCode -eq 23 -or $exitCode -eq 24) {
-            Write-Log "=========================================="
-            Write-Log "TRANSFER ABGESCHLOSSEN (mit Warnungen)" -Level "WARN"
-            Write-Log "Dateien sind jetzt unter: ${RemoteUser}@${RemoteHost}:${RemotePath}"
-        } else {
-            Write-Log "rsync beendet mit Exit-Code: $exitCode" -Level "ERROR"
-            exit $exitCode
-        }
-    }
-    catch {
-        Write-Log "Fehler bei rsync: $_" -Level "ERROR"
-        exit 1
+    if ($process.ExitCode -eq 0) {
+        Write-Log "=========================================="
+        Write-Log "TRANSFER ERFOLGREICH ABGESCHLOSSEN" -Level "OK"
+        Write-Log "Dateien sind jetzt unter: ${RemoteUser}@${RemoteHost}:${RemotePath}"
+    } else {
+        Write-Log "scp beendet mit Exit-Code: $($process.ExitCode)" -Level "ERROR"
+        exit $process.ExitCode
     }
 }
-else {
-    # Fallback: scp verwenden
-    Write-Log "rsync nicht gefunden - verwende scp (vollständige Kopie)" -Level "WARN"
-
-    $scpOptions = @(
-        "-r",                            # rekursiv
-        "-P", $SSHPort                   # Port
-    )
-
-    if ($SSHKeyPath -and (Test-Path $SSHKeyPath)) {
-        $scpOptions += "-i", $SSHKeyPath
-    }
-
-    $scpCmd = "scp $($scpOptions -join ' ') `"$SourceFolder`" `"${RemoteUser}@${RemoteHost}:${RemotePath}`""
-
-    Write-Log "Befehl: $scpCmd" -Level "CMD"
-    Write-Log "Starte Transfer..."
-
-    try {
-        $scpArgs = $scpOptions + @($SourceFolder, "${RemoteUser}@${RemoteHost}:${RemotePath}")
-        $process = Start-Process -FilePath "scp" -ArgumentList $scpArgs -NoNewWindow -Wait -PassThru
-
-        if ($process.ExitCode -eq 0) {
-            Write-Log "=========================================="
-            Write-Log "TRANSFER ERFOLGREICH ABGESCHLOSSEN" -Level "OK"
-            Write-Log "Dateien sind jetzt unter: ${RemoteUser}@${RemoteHost}:${RemotePath}"
-        } else {
-            Write-Log "scp beendet mit Exit-Code: $($process.ExitCode)" -Level "ERROR"
-            exit $process.ExitCode
-        }
-    }
-    catch {
-        Write-Log "Fehler bei scp: $_" -Level "ERROR"
-        exit 1
-    }
+catch {
+    Write-Log "Fehler bei scp: $_" -Level "ERROR"
+    exit 1
 }
 
 exit 0
