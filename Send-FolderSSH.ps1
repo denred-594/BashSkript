@@ -54,7 +54,10 @@ param(
     [int]$SSHPort = 22,
 
     [Parameter(Mandatory=$false)]
-    [string]$RemoteSubDir = "current"
+    [string]$RemoteSubDir = "current",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NonInteractive
 )
 
 function Write-Log {
@@ -108,7 +111,7 @@ function Escape-ForSingleQuotes {
 function Invoke-ExternalCommand {
     param(
         [Parameter(Mandatory=$true)][string]$FilePath,
-        [Parameter(Mandatory=$true)][object[]]$ArgumentList,
+        [Parameter(Mandatory=$true)][string[]]$ArgumentList,
         [Parameter(Mandatory=$true)][string]$Description
     )
 
@@ -116,10 +119,11 @@ function Invoke-ExternalCommand {
     Write-Log "$Description" -Level "CMD"
     Write-Log "  $FilePath $argString" -Level "CMD"
 
-    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        Write-Log "$FilePath beendet mit Exit-Code: $($process.ExitCode)" -Level "ERROR"
-        exit $process.ExitCode
+    & $FilePath @ArgumentList
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        Write-Log "$FilePath beendet mit Exit-Code: $exitCode" -Level "ERROR"
+        exit $exitCode
     }
 }
 
@@ -235,6 +239,25 @@ $scpOptions = @(
 $sshOptions = @(
     "-p", $SSHPort
 )
+
+if ($NonInteractive) {
+    $commonSshOptions = @(
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=10",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "PasswordAuthentication=no",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=0"
+    )
+
+    $sshOptions += "-T"
+    $sshOptions += "-n"
+    $sshOptions += $commonSshOptions
+    $scpOptions += $commonSshOptions
+}
 
 if ($SSHKeyPath -and (Test-Path $SSHKeyPath)) {
     $scpOptions += "-i", $SSHKeyPath
